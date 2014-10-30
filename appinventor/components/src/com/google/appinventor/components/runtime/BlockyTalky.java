@@ -23,11 +23,14 @@ import org.java_websocket.drafts.Draft;
 import org.java_websocket.drafts.Draft_10;
 import org.java_websocket.handshake.ServerHandshake;
 
+import java.awt.dnd.DragGestureEvent;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.Exception;
+import java.lang.String;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -44,37 +47,51 @@ import java.util.HashMap;
 @UsesPermissions(permissionNames = "android.permission.INTERNET")
 @UsesLibraries(libraries = "java_websocket.jar")
 public class BlockyTalky extends AndroidNonvisibleComponent implements Component {
-    private WebSocketClient client;
     private static String LOG_TAG = "BLOCKYTALKY";
+    private HashMap<String, WebSocketClient> clients;
+    private HashMap<String, String > headers;
 
     /**
      * Creates a new BlockyTalky component.
      */
     public BlockyTalky(ComponentContainer container) {
         super(container.$form());
-
-        HashMap<String, String > protocol = new HashMap<String, String>(){{
+        clients = new HashMap<String, WebSocketClient>();
+        headers = new HashMap<String, String>(){{
             put("Sec-WebSocket-Protocol","echo-protocol");
         }};
-        try {
-            client = new EmptyClient(new URI("http://130.64.196.106:8080"), new Draft_10(), protocol, 10000);
-            client.connect();
-            int i=1;
-            while(!client.isOpen()){
-                i *= i;
-                i ++;
-            }
-            Log.d(LOG_TAG, "Socket Set Up");
-        } catch (Exception e) {
-            Log.d(LOG_TAG, "Exception Caught");
-            e.printStackTrace();
-        }
+        Log.d(LOG_TAG, "Done with constructor.");
     }
 
     // Test function
     @SimpleFunction(description = "Sends a message to the WebSocket.")
-    public void SendMessage(String message) {
-        client.send(message);
+    public void SendMessage(String message, String destination) {
+        WebSocketClient client = null;
+        if (!clients.containsKey(destination)) {
+            try {
+                Log.d(LOG_TAG, "Making new socket.");
+
+
+                client = new EmptyClient(new URI(destination), new Draft_10(), headers, 10000);
+                clients.put(destination, client);
+                client.connect();
+                Log.d(LOG_TAG, "Initiated connection.");
+                int i=1;
+                while(!client.isOpen()){
+                    i *= i;
+                    i ++;
+                }
+                Log.d(LOG_TAG, "Socket Set Up");
+            } catch (Exception e) {
+                Log.d(LOG_TAG, "Exception Caught");
+                e.printStackTrace();
+            }
+        } else {
+            client = clients.get(destination);
+            Log.d(LOG_TAG, "client:");
+            Log.d(LOG_TAG, client.toString());
+        }
+        if (client != null && client.isOpen()) client.send(message);
     }
 
     public class EmptyClient extends WebSocketClient {
