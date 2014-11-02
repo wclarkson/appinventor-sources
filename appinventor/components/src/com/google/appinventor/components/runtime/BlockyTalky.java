@@ -6,8 +6,10 @@
 package com.google.appinventor.components.runtime;
 
 import com.google.appinventor.components.annotations.DesignerComponent;
+import com.google.appinventor.components.annotations.SimpleEvent;
 import com.google.appinventor.components.annotations.SimpleFunction;
 import com.google.appinventor.components.annotations.SimpleObject;
+import com.google.appinventor.components.annotations.SimpleProperty;
 import com.google.appinventor.components.annotations.UsesLibraries;
 import com.google.appinventor.components.annotations.UsesPermissions;
 import com.google.appinventor.components.common.ComponentCategory;
@@ -17,6 +19,10 @@ import com.google.appinventor.components.runtime.util.MediaUtil;
 import com.google.appinventor.components.runtime.util.YailList;
 
 import android.util.Log;
+import android.os.Handler;
+import android.os.Looper;
+
+import android.app.Activity;
 
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.drafts.Draft;
@@ -50,6 +56,8 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
     private static String LOG_TAG = "BLOCKYTALKY";
     private HashMap<String, WebSocketClient> clients;
     private HashMap<String, String > headers;
+    private Handler handler;
+    private String receivedMessage = "";
 
     /**
      * Creates a new BlockyTalky component.
@@ -60,6 +68,7 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         headers = new HashMap<String, String>(){{
             put("Sec-WebSocket-Protocol","echo-protocol");
         }};
+        handler = new Handler();
         Log.d(LOG_TAG, "Done with constructor.");
     }
 
@@ -94,8 +103,15 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         if (client != null && client.isOpen()) client.send(message);
     }
 
-    public class EmptyClient extends WebSocketClient {
+    @SimpleProperty(description = "Contents of message received from WebSocket.")
+    public String Message() { return receivedMessage; }
 
+    @SimpleEvent(description = "Message was received from WebSocket.")
+    public boolean OnMessageReceived() {
+        return EventDispatcher.dispatchEvent(this, "OnMessageReceived");
+    }
+
+    public class EmptyClient extends WebSocketClient {
         public EmptyClient(URI serverUri, Draft draft, HashMap<String, String > protocol, int timeout) {
             super(serverUri, draft, protocol, timeout);
         }
@@ -118,6 +134,12 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
 
         @Override
         public void onMessage(String message) {
+            receivedMessage = message;
+            handler.post(new Runnable() {
+                public void run() {
+                    OnMessageReceived();
+                }
+            });
             Log.d(LOG_TAG, "received message: " + message);
         }
 
