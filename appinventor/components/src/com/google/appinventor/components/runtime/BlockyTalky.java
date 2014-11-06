@@ -6,6 +6,7 @@
 package com.google.appinventor.components.runtime;
 
 import com.google.appinventor.components.annotations.DesignerComponent;
+import com.google.appinventor.components.annotations.DesignerProperty;
 import com.google.appinventor.components.annotations.SimpleEvent;
 import com.google.appinventor.components.annotations.SimpleFunction;
 import com.google.appinventor.components.annotations.SimpleObject;
@@ -13,6 +14,7 @@ import com.google.appinventor.components.annotations.SimpleProperty;
 import com.google.appinventor.components.annotations.UsesLibraries;
 import com.google.appinventor.components.annotations.UsesPermissions;
 import com.google.appinventor.components.common.ComponentCategory;
+import com.google.appinventor.components.common.PropertyTypeConstants;
 import com.google.appinventor.components.common.YaVersion;
 import com.google.appinventor.components.runtime.util.ErrorMessages;
 import com.google.appinventor.components.runtime.util.MediaUtil;
@@ -28,6 +30,7 @@ import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.drafts.Draft;
 import org.java_websocket.drafts.Draft_10;
 import org.java_websocket.handshake.ServerHandshake;
+import org.json.JSONObject;
 
 import java.awt.dnd.DragGestureEvent;
 import java.io.BufferedInputStream;
@@ -58,6 +61,9 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
     private HashMap<String, String > headers;
     private Handler handler;
     private String receivedMessage = "";
+    private String receivedMessageFrom = "";
+    private String nodeName = "BlockyTalky";
+    private final String blockyTalkyMessageRouter = "ws://btrouter.getdown.org:8005/dax";
 
     /**
      * Creates a new BlockyTalky component.
@@ -73,8 +79,7 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
     }
 
     // Test function
-    @SimpleFunction(description = "Sends a message to the WebSocket.")
-    public void SendMessage(String message, String destination) {
+    private void sendString(String message, String destination) {
         WebSocketClient client = null;
         if (!clients.containsKey(destination)) {
             try {
@@ -95,20 +100,76 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
                 Log.d(LOG_TAG, "Exception Caught");
                 e.printStackTrace();
             }
+            BlockyTalkyMessage registerMessage = new BlockyTalkyMessage(this.nodeName, "dax", "");
+            client.send(registerMessage.toJson());
         } else {
             client = clients.get(destination);
             Log.d(LOG_TAG, "client:");
             Log.d(LOG_TAG, client.toString());
         }
-        if (client != null && client.isOpen()) client.send(message);
+        if (client != null && client.isOpen()) {
+            client.send(message);
+        }
     }
+
+    @SimpleFunction(description = "Sends a message to a BlockyTalky")
+    public void SendMessage(String message, String destination) {
+        BlockyTalkyMessage btMessage = new BlockyTalkyMessage(this.nodeName, destination, message);
+        this.sendString(btMessage.toJson(), blockyTalkyMessageRouter);
+    }
+
+    /*
+    @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_STRING,
+            defaultValue = "BlockyTalky")
+    @SimpleProperty(description = "Name of message sender")
+    public void NodeName(String name) {
+        this.nodeName = name;
+    }
+    */
 
     @SimpleProperty(description = "Contents of message received from WebSocket.")
     public String Message() { return receivedMessage; }
+/*
+    @SimpleProperty(description = "Sender of message received from WebSocket.")
+    public String Sender() { return receivedMessageFrom; }
+*/
 
     @SimpleEvent(description = "Message was received from WebSocket.")
     public boolean OnMessageReceived() {
         return EventDispatcher.dispatchEvent(this, "OnMessageReceived");
+    }
+
+    public class BlockyTalkyMessage {
+        private String source;
+        private String destination;
+        private String content;
+
+        public BlockyTalkyMessage(String source, String destination, String content) {
+            this.source = source;
+            this.destination = destination;
+            this.content = content;
+        }
+
+        public BlockyTalkyMessage(String json) {
+            JSONObject message;
+            Log.d(LOG_TAG, "parsing json: " + json);
+            try {
+                message = new JSONObject(json);
+                this.source = message.getString("source");
+                this.destination = message.getString("destination");
+                this.content = message.getString("content");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        public String toJson() {
+            return String.format(
+                    "{\"py/object\": \"__main__.Message\", \"content\": \"%s\", \"destination\": \"%s\", \"source\": \"%s\"}",
+                    this.content,
+                    this.destination,
+                    this.source);
+        }
     }
 
     public class EmptyClient extends WebSocketClient {
@@ -133,14 +194,16 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         }
 
         @Override
-        public void onMessage(String message) {
-            receivedMessage = message;
+        public void onMessage(String json) {
+            BlockyTalkyMessage message = new BlockyTalkyMessage(json);
+            receivedMessage = message.content;
+            receivedMessageFrom = message.source;
+            Log.d(LOG_TAG, "received message: " + message.toJson());
             handler.post(new Runnable() {
                 public void run() {
                     OnMessageReceived();
                 }
             });
-            Log.d(LOG_TAG, "received message: " + message);
         }
 
         @Override
