@@ -143,6 +143,8 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         private String source;
         private String destination;
         private String content;
+        private String jsonFormatString =
+                "{\"py/object\": \"__main__.Message\", \"content\": \"%s\", \"destination\": \"%s\", \"source\": \"%s\"}";
 
         public BlockyTalkyMessage(String source, String destination, String content) {
             this.source = source;
@@ -165,7 +167,7 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
 
         public String toJson() {
             return String.format(
-                    "{\"py/object\": \"__main__.Message\", \"content\": \"%s\", \"destination\": \"%s\", \"source\": \"%s\"}",
+                    this.jsonFormatString,
                     this.content,
                     this.destination,
                     this.source);
