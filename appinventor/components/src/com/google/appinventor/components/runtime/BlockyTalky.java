@@ -23,7 +23,6 @@ import com.google.appinventor.components.runtime.util.YailList;
 import android.util.Log;
 import android.os.Handler;
 import android.os.Looper;
-
 import android.app.Activity;
 
 import org.java_websocket.client.WebSocketClient;
@@ -102,6 +101,7 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
             }
             BlockyTalkyMessage registerMessage = new BlockyTalkyMessage(this.nodeName, "dax", "");
             client.send(registerMessage.toJson());
+            Log.d(LOG_TAG, "registered with message router as " + this.nodeName);
         } else {
             client = clients.get(destination);
             Log.d(LOG_TAG, "client:");
@@ -118,14 +118,13 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         this.sendString(btMessage.toJson(), blockyTalkyMessageRouter);
     }
 
-    /*
+
     @DesignerProperty(editorType = PropertyTypeConstants.PROPERTY_TYPE_STRING,
             defaultValue = "BlockyTalky")
     @SimpleProperty(description = "Name of message sender")
     public void NodeName(String name) {
         this.nodeName = name;
     }
-    */
 
     @SimpleProperty(description = "Contents of message received from WebSocket.")
     public String Message() { return receivedMessage; }
