@@ -50,7 +50,7 @@ import java.util.HashMap;
         description = "Description",
         category = ComponentCategory.CONNECTIVITY,
         nonVisible = true,
-        iconName = "icon")
+        iconName = "images/bt.png")
 @SimpleObject
 @UsesPermissions(permissionNames = "android.permission.INTERNET")
 @UsesLibraries(libraries = "java_websocket.jar")
