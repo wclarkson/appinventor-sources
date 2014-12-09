@@ -260,6 +260,13 @@ public interface Images extends Resources {
   @Source("com/google/appinventor/images/activityStarter.png")
   ImageResource activitystarter();
 
+/**
+   * Designer palette item: BlockyTalky component
+   */
+  @Source("com/google/appinventor/images/bt.png")
+  ImageResource blockytalky();
+
+
   /**
    * Designer palette item: EmailPicker component
    */
