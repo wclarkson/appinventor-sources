@@ -1179,7 +1179,7 @@
 (define (coerce-to-string arg)
   (cond ((eq? arg *the-null-value*) *the-null-value-printed-rep*)
         ((string? arg) arg)
-        ((number? arg) (number->string arg))
+        ((number? arg) (appinventor-number->string arg))
         ((boolean? arg) (boolean->string arg))
         ((yail-list? arg) (coerce-to-string (yail-list->kawa-list arg)))
         ((list? arg)
@@ -1207,7 +1207,7 @@
              (if (string=? arg "")
                  *the-empty-string-printed-rep*
                  arg))
-            ((number? arg) (number->string arg))
+            ((number? arg) (appinventor-number->string arg))
             ((boolean? arg) (boolean->string arg))
             ((yail-list? arg) (get-display-representation (yail-list->kawa-list arg)))
             ((list? arg)
@@ -1275,13 +1275,13 @@
 ;;; TODO(halabelson): This punts back to Kawa's default if n is a complex number.  Decide
 ;;; if we'd like to do something different. Be careful here, because Kawa's treatment of
 ;;; exact complex numbers seems incomplete, e.g. (exact->inexact +1i) gives an error
-(define (number->string n)
+(define (appinventor-number->string n)
   (cond ((not (real? n)) (call-with-output-string (lambda (port) (display n port))))
         ((integer? n) (call-with-output-string (lambda (port) (display n port))))
         ;; if it's a rational then format it as a decimal
         ;; Note that rationals are still exact rationals -- they just print
         ;; as decimals.  That is, 7*(1/7) equals 1 exactly
-        ((exact? n) (number->string (exact->inexact n)))
+        ((exact? n) (appinventor-number->string (exact->inexact n)))
         (else (*format-inexact* n))))
 
 ;;; yail-equal? method
@@ -1503,7 +1503,7 @@
   (if (= places 0)
       (yail-round number)
       (if (and (integer? places) (> places 0))
-          (format #f (string-append "~," (number->string places) "f") number)
+          (format #f (string-append "~," (appinventor-number->string places) "f") number)
           (signal-runtime-error
            (string-append
             "format-as-decimal was called with "
@@ -1901,11 +1901,11 @@ list, use the make-yail-list constructor with no arguments.
          ;; (signal-runtime-error
          ;;  (string-append
          ;;   "FOR RANGE was called with a start of "
-         ;;   (number->string start)
+         ;;   (appinventor-number->string start)
          ;;   " and an end of "
-         ;;   (number->string end)
+         ;;   (appinventor-number->string end)
          ;;   " and a step of "
-         ;;   (number->string step)
+         ;;   (appinventor-number->string step)
          ;;   ". This would run forever.")
          ;;  "Bad inputs to FOR RANGE")
          *the-null-value*
@@ -2048,8 +2048,23 @@ list, use the make-yail-list constructor with no arguments.
 (define (string-empty? text)
   (= 0 (string-length text)))
 
+(define (text-deobsfucate text confounder)
+  (let ((lc confounder))
+    (while (< (string-length lc) (string-length text))
+           (set! lc (string-append lc lc)))
+    (do ((i 0 (+ 1 i))
+         (acc (list))
+         (len (string-length text)))
+        ((>= i (string-length text)) (list->string (map integer->char (reverse acc))))
+      (let* ((c (char->integer (string-ref text i)))
+             (b (bitwise-and (bitwise-xor c (- len i)) 255))
+             (b2 (bitwise-and (bitwise-xor (bitwise-arithmetic-shift-right c 8) i) 255))
+             (b3 (bitwise-and (bitwise-ior (bitwise-arithmetic-shift-left b2 8) b) 255))
+             (b4 (bitwise-and (bitwise-xor b3 (char->integer (string-ref lc i))) 255)))
+        (set! acc (cons b4 acc))))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;; End of List implementation
+;;;; End of Text implementation
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

@@ -1,7 +1,8 @@
 // -*- mode: java; c-basic-offset: 2; -*-
 // Copyright 2009-2011 Google, All Rights reserved
 // Copyright 2011-2012 MIT, All rights reserved
-// Released under the MIT License https://raw.github.com/mit-cml/app-inventor/master/mitlicense.txt
+// Released under the Apache License, Version 2.0
+// http://www.apache.org/licenses/LICENSE-2.0
 
 package com.google.appinventor.server.storage;
 
@@ -44,6 +45,7 @@ import com.google.appinventor.shared.storage.StorageUtil;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.io.ByteSource;
 import com.google.common.io.ByteStreams;
 
 import com.googlecode.objectify.Key;
@@ -102,8 +104,7 @@ public class ObjectifyStorageIo implements  StorageIo {
 
   private final MemcacheService memcache = MemcacheServiceFactory.getMemcacheService();
 
-  private final GcsService gcsService =
-    GcsServiceFactory.createGcsService(RetryParams.getDefaultInstance());
+  private final GcsService gcsService;
 
   private final String GCS_BUCKET_NAME = Flag.createFlag("gcs.bucket", "").get();
 
@@ -112,10 +113,25 @@ public class ObjectifyStorageIo implements  StorageIo {
   private final boolean useGcs = Flag.createFlag("use.gcs", false).get();
 
 
-  // Use this class to define the work of a job that can be retried. The
-  // "datastore" argument to run() is the Objectify object for this job
-  // (created with ObjectifyService.beginTransaction()). Note that all operations
-  // on "datastore" should be for objects in the same entity group.
+  // Use this class to define the work of a job that can be
+  // retried. The "datastore" argument to run() is the Objectify
+  // object for this job (created with
+  // ObjectifyService.beginTransaction() if a transaction is used or
+  // ObjectifyService.begin if no transaction is used). Note that all
+  // operations on "datastore" should be for objects in the same
+  // entity group if a transaction is used.
+
+  // Note: 1/25/2015: Added code to make the use of a transaction
+  //                  optional.  In general we only need to use a
+  //                  transaction where there work we would need to
+  //                  rollback if an operation on the datastore
+  //                  failed. We have not necessarily converted all
+  //                  cases yet (out of a sense of caution). However
+  //                  we have removed transaction in places where
+  //                  doing so permits Objectify to use its global
+  //                  cache (memcache) in a way that helps
+  //                  performance.
+
   @VisibleForTesting
   abstract class JobRetryHelper {
     public abstract void run(Objectify datastore) throws ObjectifyException;
@@ -154,6 +170,16 @@ public class ObjectifyStorageIo implements  StorageIo {
 
   ObjectifyStorageIo() {
     fileService = FileServiceFactory.getFileService();
+    RetryParams retryParams = new RetryParams.Builder().initialRetryDelayMillis(100)
+      .retryMaxAttempts(10)
+      .totalRetryPeriodMillis(10000).build();
+    LOG.log(Level.INFO, "RetryParams: getInitialRetryDelayMillis() = " + retryParams.getInitialRetryDelayMillis());
+    LOG.log(Level.INFO, "RetryParams: getRequestTimeoutMillis() = " + retryParams.getRequestTimeoutMillis());
+    LOG.log(Level.INFO, "RetryParams: getRetryDelayBackoffFactor() = " + retryParams.getRetryDelayBackoffFactor());
+    LOG.log(Level.INFO, "RetryParams: getRetryMaxAttempts() = " + retryParams.getRetryMaxAttempts());
+    LOG.log(Level.INFO, "RetryParams: getRetryMinAttempts() = " + retryParams.getRetryMinAttempts());
+    LOG.log(Level.INFO, "RetryParams: getTotalRetryPeriodMillis() = " + retryParams.getTotalRetryPeriodMillis());
+    gcsService = GcsServiceFactory.createGcsService(retryParams);
     memcache.setErrorHandler(ErrorHandlers.getConsistentLogAndContinue(Level.INFO));
     initMotd();
   }
@@ -161,6 +187,10 @@ public class ObjectifyStorageIo implements  StorageIo {
   // for testing
   ObjectifyStorageIo(FileService fileService) {
     this.fileService = fileService;
+    RetryParams retryParams = new RetryParams.Builder().initialRetryDelayMillis(100)
+      .retryMaxAttempts(10)
+      .totalRetryPeriodMillis(10000).build();
+    gcsService = GcsServiceFactory.createGcsService(retryParams);
     initMotd();
   }
 
@@ -179,10 +209,14 @@ public class ObjectifyStorageIo implements  StorageIo {
     String cachekey = User.usercachekey + "|" + userId;
     User tuser = (User) memcache.get(cachekey);
     if (tuser != null && tuser.getUserTosAccepted() && ((email == null) || (tuser.getUserEmail().equals(email)))) {
+      if (tuser.getUserName()==null) {
+        setUserName(userId,tuser.getDefaultName());
+        tuser.setUserName(tuser.getDefaultName());
+      }
       return tuser;
     } else {                    // If not in memcache, or tos
                                 // not yet accepted, fetch from datastore
-      tuser = new User(userId, email, false, false, null);
+        tuser = new User(userId, email, null, null, false, false, 0, null);
     }
     final User user = tuser;
     try {
@@ -197,10 +231,13 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(userData);
           }
           user.setUserEmail(userData.email);
+          user.setUserName(userData.name);
+          user.setUserLink(userData.link);
+          user.setType(userData.type);
           user.setUserTosAccepted(userData.tosAccepted || !requireTos.get());
           user.setSessionId(userData.sessionid);
         }
-      });
+      }, false);                // Transaction not needed. If we fail there is nothing to rollback
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -220,6 +257,9 @@ public class ObjectifyStorageIo implements  StorageIo {
     userData.tosAccepted = false;
     userData.settings = "";
     userData.email = email == null ? "" : email;
+    userData.name = User.getDefaultName(email);
+    userData.type = User.USER;
+    userData.link = "";
     datastore.put(userData);
     return userData;
   }
@@ -236,7 +276,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(userData);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -254,7 +294,54 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(userData);
           }
         }
-      });
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
+    }
+  }
+
+  @Override
+  public void setUserName(final String userId, final String name) {
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          UserData userData = datastore.find(userKey(userId));
+          if (userData != null) {
+            userData.name = name;
+            datastore.put(userData);
+          }
+          // we need to change the memcache version of user
+          User user = new User(userData.id,userData.email,name, userData.link, userData.tosAccepted,
+              false, userData.type, userData.sessionid);
+          String cachekey = User.usercachekey + "|" + userId;
+          memcache.put(cachekey, user, Expiration.byDeltaSeconds(60)); // Remember for one minute
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
+    }
+
+  }
+
+  @Override
+  public void setUserLink(final String userId, final String link) {
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          UserData userData = datastore.find(userKey(userId));
+          if (userData != null) {
+            userData.link = link;
+            datastore.put(userData);
+          }
+          // we need to change the memcache version of user
+          User user = new User(userData.id,userData.email,userData.name,link,userData.tosAccepted,
+              false, userData.type, userData.sessionid);
+          String cachekey = User.usercachekey + "|" + userId;
+          memcache.put(cachekey, user, Expiration.byDeltaSeconds(60)); // Remember for one minute
+        }
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -273,7 +360,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(userData);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -294,11 +381,53 @@ public class ObjectifyStorageIo implements  StorageIo {
             settings.t = "";
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
     return settings.t;
+  }
+
+  @Override
+  public String getUserName(final String userId) {
+    final Result<String> name = new Result<String>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          UserData userData = datastore.find(UserData.class, userId);
+          if (userData != null) {
+            name.t = userData.name;
+          } else {
+            name.t = "unknown";
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
+    }
+    return name.t;
+  }
+
+  @Override
+  public String getUserLink(final String userId) {
+    final Result<String> link = new Result<String>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          UserData userData = datastore.find(UserData.class, userId);
+          if (userData != null) {
+            link.t = userData.link;
+          } else {
+            link.t = "unknown";
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
+    }
+    return link.t;
   }
 
   @Override
@@ -314,12 +443,11 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(userData);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
   }
-
   @Override
   public long createProject(final String userId, final Project project,
       final String projectSettings) {
@@ -342,6 +470,8 @@ public class ObjectifyStorageIo implements  StorageIo {
           pd.name = project.getProjectName();
           pd.settings = projectSettings;
           pd.type = project.getProjectType();
+          pd.galleryId = UserProject.NOTPUBLISHED;
+          pd.attributionId = UserProject.FROMSCRATCH;
           datastore.put(pd); // put the project in the db so that it gets assigned an id
 
           assert pd.id != null;
@@ -400,7 +530,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           // clear addedFiles in case we end up here more than once
           addedFiles.clear();
         }
-      });
+      }, true);
 
       // second job is on the user entity
       runJobWithRetries(new JobRetryHelper() {
@@ -413,7 +543,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           upd.userKey = userKey(userId);
           datastore.put(upd);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       for (FileData addedFile : addedFiles) {
         if (addedFile.isBlob && addedFile.blobstorePath != null) {
@@ -449,12 +579,10 @@ public class ObjectifyStorageIo implements  StorageIo {
     if (useGCSforFile(fileName, content.length)) {
       file.isGCS = true;
       file.gcsName = makeGCSfileName(fileName, projectKey.getId());
-      if (content.length > 0) { // If there is actual content
-        GcsOutputChannel outputChannel =
-          gcsService.createOrReplace(new GcsFilename(GCS_BUCKET_NAME, file.gcsName), GcsFileOptions.getDefaultInstance());
-        outputChannel.write(ByteBuffer.wrap(content));
-        outputChannel.close();
-      }
+      GcsOutputChannel outputChannel =
+        gcsService.createOrReplace(new GcsFilename(GCS_BUCKET_NAME, file.gcsName), GcsFileOptions.getDefaultInstance());
+      outputChannel.write(ByteBuffer.wrap(content));
+      outputChannel.close();
     } else if (useBlobstoreForFile(fileName, content.length)) {
       file.isBlob = true;
       file.blobstorePath = uploadToBlobstore(content, makeBlobName(projectKey.getId(), fileName));
@@ -479,7 +607,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           datastore.delete(userProjectKey(userKey, projectId));
           // delete any FileData objects associated with this project
         }
-      });
+      }, true);
       // second job deletes the project files and ProjectData in the project's
       // entity group
       runJobWithRetries(new JobRetryHelper() {
@@ -498,7 +626,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           // finally, delete the ProjectData object
           datastore.delete(projectKey);
         }
-      });
+      }, true);
       // have to delete the blobs outside of the user and project jobs
       for (String blobPath: blobPaths) {
         deleteBlobstoreFile(blobPath);
@@ -519,6 +647,41 @@ public class ObjectifyStorageIo implements  StorageIo {
   }
 
   @Override
+  public void setProjectGalleryId(final String userId, final long projectId,final long galleryId) {
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          ProjectData projectData = datastore.find(projectKey(projectId));
+          if (projectData != null) {
+            projectData.galleryId = galleryId;
+            datastore.put(projectData);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
+    }
+  }
+  @Override
+  public void setProjectAttributionId(final String userId, final long projectId,final long attributionId) {
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          ProjectData projectData = datastore.find(projectKey(projectId));
+          if (projectData != null) {
+            projectData.attributionId = attributionId;
+            datastore.put(projectData);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+       throw CrashReport.createAndLogError(LOG, null,"error in setProjectAttributionId",  e);
+    }
+  }
+
+  @Override
   public List<Long> getProjects(final String userId) {
     final List<Long> projects = new ArrayList<Long>();
     try {
@@ -530,7 +693,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             projects.add(upd.projectId);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -557,7 +720,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             settings.t = "";
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -578,7 +741,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(pd);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -622,7 +785,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             projectData.t = null;
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -632,7 +795,8 @@ public class ObjectifyStorageIo implements  StorageIo {
     } else {
       return new UserProject(projectId, projectData.t.name,
           projectData.t.type, projectData.t.dateCreated,
-          projectData.t.dateModified);
+          projectData.t.dateModified, projectData.t.galleryId,
+          projectData.t.attributionId);
     }
   }
 
@@ -650,7 +814,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             projectName.t = "";
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -672,7 +836,8 @@ public class ObjectifyStorageIo implements  StorageIo {
             modDate.t = Long.valueOf(0);
           }
         }
-      });
+      }, false); // Transaction not needed, and we want the caching we get if we don't
+                 // use them.
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -699,12 +864,79 @@ public class ObjectifyStorageIo implements  StorageIo {
             projectHistory.t = "";
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
     }
     return projectHistory.t;
+  }
+
+  // JIS XXX
+
+  @Override
+  public long getProjectDateCreated(final String userId, final long projectId) {
+    final Result<Long> dateCreated = new Result<Long>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          ProjectData pd = datastore.find(projectKey(projectId));
+          if (pd != null) {
+            dateCreated.t = pd.dateCreated;
+          } else {
+            dateCreated.t = Long.valueOf(0);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          collectUserProjectErrorInfo(userId, projectId), e);
+    }
+    return dateCreated.t;
+  }
+
+  @Override
+  public long getProjectGalleryId(String userId, final long projectId) {
+    final Result<Long> galleryId = new Result<Long>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          ProjectData pd = datastore.find(projectKey(projectId));
+          if (pd != null) {
+            galleryId.t = pd.galleryId;
+          } else {
+            galleryId.t = Long.valueOf(0);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG,
+          null,"error in getProjectGalleryId", e);
+    }
+    return galleryId.t;
+  }
+  @Override
+  public long getProjectAttributionId(final long projectId) {
+    final Result<Long> attributionId = new Result<Long>();
+    try {
+      runJobWithRetries(new JobRetryHelper() {
+        @Override
+        public void run(Objectify datastore) {
+          ProjectData pd = datastore.find(projectKey(projectId));
+          if (pd != null) {
+            attributionId.t = pd.attributionId;
+          } else {
+            attributionId.t = Long.valueOf(UserProject.FROMSCRATCH);
+          }
+        }
+      }, true);
+    } catch (ObjectifyException e) {
+      throw CrashReport.createAndLogError(LOG, null,
+          "error in getProjectAttributionId", e);
+    }
+    return attributionId.t;
   }
 
   @Override
@@ -723,7 +955,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           }
           datastore.put(addedFiles);  // batch put
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserErrorInfo(userId, fileNames[0]), e);
@@ -760,7 +992,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             fileList.add(ufd.fileName);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
     }
@@ -784,7 +1016,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           }
           addUserFileContents(datastore, userId, fileName, bytes);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId, fileName), e);
     }
@@ -799,7 +1031,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           addUserFileContents(datastore, userId, fileName, content);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId, fileName), e);
     }
@@ -831,7 +1063,7 @@ public class ObjectifyStorageIo implements  StorageIo {
                 collectUserErrorInfo(userId, fileName), e);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId, fileName), e);
     }
@@ -853,7 +1085,7 @@ public class ObjectifyStorageIo implements  StorageIo {
                 new FileNotFoundException(fileName));
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId, fileName), e);
     }
@@ -871,7 +1103,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.delete(ufdKey);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId, fileName), e);
     }
@@ -897,7 +1129,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           addFilesToProject(datastore, projectId, FileData.RoleEnum.SOURCE, changeModDate, fileNames);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
@@ -918,7 +1150,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           addFilesToProject(datastore, projectId, FileData.RoleEnum.TARGET, false, fileNames);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
@@ -967,7 +1199,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           removeFilesFromProject(datastore, projectId, FileData.RoleEnum.SOURCE, changeModDate, fileNames);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
@@ -983,7 +1215,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           removeFilesFromProject(datastore, projectId, FileData.RoleEnum.TARGET, false, fileNames);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
@@ -995,7 +1227,9 @@ public class ObjectifyStorageIo implements  StorageIo {
     Key<ProjectData> projectKey = projectKey(projectId);
     List<Key<FileData>> filesToRemove = new ArrayList<Key<FileData>>();
     for (String fileName : fileNames) {
-      FileData fd = datastore.find(projectFileKey(projectKey, fileName));
+      Key<FileData> key = projectFileKey(projectKey, fileName);
+      memcache.delete(key.getString()); // Remove it from memcache (if it is there)
+      FileData fd = datastore.find(key);
       if (fd != null) {
         if (fd.role.equals(role)) {
           filesToRemove.add(projectFileKey(projectKey, fileName));
@@ -1026,7 +1260,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           result.t = getProjectFiles(datastore, projectId, FileData.RoleEnum.SOURCE);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -1048,7 +1282,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         public void run(Objectify datastore) {
           result.t = getProjectFiles(datastore, projectId, FileData.RoleEnum.TARGET);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -1094,8 +1328,15 @@ public class ObjectifyStorageIo implements  StorageIo {
     long modDate = System.currentTimeMillis();
     ProjectData pd = datastore.find(projectKey(projectId));
     if (pd != null) {
-      pd.dateModified = modDate;
-      datastore.put(pd);
+      // Only update the ProjectData dateModified if it is more then a minute
+      // in the future. Do this to avoid unnecessary datastore puts
+      if (modDate > (pd.dateModified + 1000*60)) {
+        pd.dateModified = modDate;
+        datastore.put(pd);
+      } else {
+        // return the (old) dateModified
+        modDate = pd.dateModified;
+      }
       return modDate;
     } else {
       throw CrashReport.createAndLogError(LOG, null, null,
@@ -1132,7 +1373,13 @@ public class ObjectifyStorageIo implements  StorageIo {
 
         @Override
         public void run(Objectify datastore) throws ObjectifyException {
-          fd = datastore.find(projectFileKey(projectKey(projectId), fileName));
+          Key<FileData> key = projectFileKey(projectKey(projectId), fileName);
+          fd = (FileData) memcache.get(key.getString());
+          if (fd == null) {
+            fd = datastore.find(projectFileKey(projectKey(projectId), fileName));
+          } else {
+            LOG.log(Level.INFO, "Fetched " + key.getString() + " from memcache.");
+          }
 
           // <Screen>.yail files are missing when user converts AI1 project to AI2
           // instead of blowing up, just create a <Screen>.yail file
@@ -1156,12 +1403,10 @@ public class ObjectifyStorageIo implements  StorageIo {
             fd.isGCS = true;
             fd.gcsName = makeGCSfileName(fileName, projectId);
             try {
-              if (content.length > 0) { // If there is actual content
-                GcsOutputChannel outputChannel =
-                  gcsService.createOrReplace(new GcsFilename(GCS_BUCKET_NAME, fd.gcsName), GcsFileOptions.getDefaultInstance());
-                outputChannel.write(ByteBuffer.wrap(content));
-                outputChannel.close();
-              }
+              GcsOutputChannel outputChannel =
+                gcsService.createOrReplace(new GcsFilename(GCS_BUCKET_NAME, fd.gcsName), GcsFileOptions.getDefaultInstance());
+              outputChannel.write(ByteBuffer.wrap(content));
+              outputChannel.close();
             } catch (IOException e) {
               throw CrashReport.createAndLogError(LOG, null,
                 collectProjectErrorInfo(userId, projectId, fileName), e);
@@ -1219,6 +1464,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             }
           }
           datastore.put(fd);
+          memcache.put(key.getString(), fd); // Store the updated data in memcache
           modTime.t = updateProjectModDate(datastore, projectId);
         }
 
@@ -1228,7 +1474,9 @@ public class ObjectifyStorageIo implements  StorageIo {
             oldBlobstorePath.t = fd.blobstorePath;
           }
         }
-      });
+      }, useBlobstore);        // Use transaction for blobstore, otherwise we don't need one
+                               // and without one the caching code comes into play.
+
       // It would have been convenient to delete the old blobstore file within the run() method
       // above but that caused an exception where the app engine datastore claimed to be doing
       // operations on multiple entity groups within the same transaction.  Apparently the blobstore
@@ -1272,7 +1520,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       FileWriteChannel blobstoreWriteChannel = fileService.openWriteChannel(blobstoreFile, true);
 
       OutputStream blobstoreOutputStream = Channels.newOutputStream(blobstoreWriteChannel);
-      ByteStreams.copy(ByteStreams.newInputStreamSupplier(content), blobstoreOutputStream);
+      ByteStreams.copy(ByteSource.wrap(content).openStream(), blobstoreOutputStream);
       blobstoreOutputStream.flush();
       blobstoreOutputStream.close();
       blobstoreWriteChannel.closeFinally();
@@ -1336,6 +1584,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         @Override
         public void run(Objectify datastore) {
           Key<FileData> fileKey = projectFileKey(projectKey(projectId), fileName);
+          memcache.delete(fileKey.getString());
           FileData fileData = datastore.find(fileKey);
           if (fileData != null) {
             oldBlobstorePath.t = fileData.blobstorePath;
@@ -1346,7 +1595,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           datastore.delete(fileKey);
           modTime.t = updateProjectModDate(datastore, projectId);
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileName), e);
@@ -1394,7 +1643,7 @@ public class ObjectifyStorageIo implements  StorageIo {
           public void run(Objectify datastore) {
             datastore.put(data);
           }
-        });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, null, e);
     }
@@ -1414,9 +1663,12 @@ public class ObjectifyStorageIo implements  StorageIo {
         @Override
         public void run(Objectify datastore) {
           Key<FileData> fileKey = projectFileKey(projectKey(projectId), fileName);
-          fd.t = datastore.find(fileKey);
+          fd.t = (FileData) memcache.get(fileKey.getString());
+          if (fd.t == null) {
+            fd.t = datastore.find(fileKey);
+          }
         }
-      });
+      }, false); // Transaction not needed
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectProjectErrorInfo(userId, projectId, fileName), e);
@@ -1426,22 +1678,53 @@ public class ObjectifyStorageIo implements  StorageIo {
     if (fileData != null) {
       if (fileData.isGCS) {     // It's in the Cloud Store
         try {
-          GcsFilename gcsFileName = new GcsFilename(GCS_BUCKET_NAME, fileData.gcsName);
-          int bytesRead = 0;
-          int fileSize = (int) gcsService.getMetadata(gcsFileName).getLength();
-          ByteBuffer resultBuffer = ByteBuffer.allocate(fileSize);
-          GcsInputChannel readChannel = gcsService.openReadChannel(gcsFileName, 0);
-          try {
-            while (bytesRead < fileSize) {
-              bytesRead += readChannel.read(resultBuffer);
-              if (bytesRead < fileSize) {
-                LOG.log(Level.INFO, "readChannel: bytesRead = " + bytesRead + " fileSize = " + fileSize);
+          int count;
+          boolean npfHappened = false;
+          boolean recovered = false;
+          for (count = 0; count < 5; count++) {
+            GcsFilename gcsFileName = new GcsFilename(GCS_BUCKET_NAME, fileData.gcsName);
+            int bytesRead = 0;
+            int fileSize = 0;
+            ByteBuffer resultBuffer;
+            try {
+              fileSize = (int) gcsService.getMetadata(gcsFileName).getLength();
+              resultBuffer = ByteBuffer.allocate(fileSize);
+              GcsInputChannel readChannel = gcsService.openReadChannel(gcsFileName, 0);
+              try {
+                while (bytesRead < fileSize) {
+                  bytesRead += readChannel.read(resultBuffer);
+                  if (bytesRead < fileSize) {
+                    LOG.log(Level.INFO, "readChannel: bytesRead = " + bytesRead + " fileSize = " + fileSize);
+                  }
+                }
+                recovered = true;
+                result.t = resultBuffer.array();
+                break;          // We got the data, break out of the loop!
+              } finally {
+                readChannel.close();
               }
+            } catch (NullPointerException e) {
+              // This happens if the object in GCS is non-existent, which would happen
+              // when people uploaded a zero length object. As of this change, we now
+              // store zero length objects into GCS, but there are plenty of older objects
+              // that are missing in GCS.
+              LOG.log(Level.WARNING, "downloadrawfile: NPF recorded for " + fileData.gcsName);
+              npfHappened = true;
+              resultBuffer = ByteBuffer.allocate(0);
+              result.t = resultBuffer.array();
             }
-          } finally {
-            readChannel.close();
           }
-          result.t = resultBuffer.array();
+
+          // report out on how things went above
+          if (npfHappened) {    // We lost at least once
+            if (recovered) {
+              LOG.log(Level.WARNING, "recovered from NPF in downloadrawfile filename = " + fileData.gcsName +
+                " count = " + count);
+            } else {
+              LOG.log(Level.WARNING, "FATAL NPF in downloadrawfile filename = " + fileData.gcsName);
+            }
+          }
+
         } catch (IOException e) {
           throw CrashReport.createAndLogError(LOG, null,
               collectProjectErrorInfo(userId, projectId, fileName), e);
@@ -1500,7 +1783,8 @@ public class ObjectifyStorageIo implements  StorageIo {
   public ProjectSourceZip exportProjectSourceZip(final String userId, final long projectId,
                                                  final boolean includeProjectHistory,
                                                  final boolean includeAndroidKeystore,
-                                                 @Nullable String zipName) throws IOException {
+                                                 @Nullable String zipName,
+                                                 final boolean fatalError) throws IOException {
     final Result<Integer> fileCount = new Result<Integer>();
     fileCount.t = 0;
     final Result<String> projectHistory = new Result<String>();
@@ -1542,13 +1826,13 @@ public class ObjectifyStorageIo implements  StorageIo {
             }
           }
         }
-      });
+      }, true);
 
       // Process the file contents outside of the job since we can't read
       // blobs in the job.
       for (FileData fd : fileData) {
         fileName = fd.fileName;
-        byte[] data;
+        byte[] data = null;
         if (fd.isBlob) {
           try {
             data = getBlobstoreBytes(fd.blobstorePath);
@@ -1558,22 +1842,55 @@ public class ObjectifyStorageIo implements  StorageIo {
           }
         } else if (fd.isGCS) {
           try {
-            GcsFilename gcsFileName = new GcsFilename(GCS_BUCKET_NAME, fd.gcsName);
-            int bytesRead = 0;
-            int fileSize = (int) gcsService.getMetadata(gcsFileName).getLength();
-            ByteBuffer resultBuffer = ByteBuffer.allocate(fileSize);
-            GcsInputChannel readChannel = gcsService.openReadChannel(gcsFileName, 0);
-            try {
-              while (bytesRead < fileSize) {
-                bytesRead += readChannel.read(resultBuffer);
-                if (bytesRead < fileSize) {
-                  LOG.log(Level.INFO, "readChannel: bytesRead = " + bytesRead + " fileSize = " + fileSize);
+            int count;
+            boolean npfHappened = false;
+            boolean recovered = false;
+            for (count = 0; count < 5; count++) {
+              GcsFilename gcsFileName = new GcsFilename(GCS_BUCKET_NAME, fd.gcsName);
+              int bytesRead = 0;
+              int fileSize = 0;
+              ByteBuffer resultBuffer;
+              try {
+                fileSize = (int) gcsService.getMetadata(gcsFileName).getLength();
+                resultBuffer = ByteBuffer.allocate(fileSize);
+                GcsInputChannel readChannel = gcsService.openReadChannel(gcsFileName, 0);
+                try {
+                  while (bytesRead < fileSize) {
+                    bytesRead += readChannel.read(resultBuffer);
+                    if (bytesRead < fileSize) {
+                      LOG.log(Level.INFO, "readChannel: bytesRead = " + bytesRead + " fileSize = " + fileSize);
+                    }
+                  }
+                  recovered = true;
+                  data = resultBuffer.array();
+                  break;        // We got the data, break out of the loop!
+                } finally {
+                  readChannel.close();
+                }
+              } catch (NullPointerException e) {
+                // This happens if the object in GCS is non-existent, which would happen
+                // when people uploaded a zero length object. As of this change, we now
+                // store zero length objects into GCS, but there are plenty of older objects
+                // that are missing in GCS.
+                LOG.log(Level.WARNING, "exportProjectFile: NPF recorded for " + fd.gcsName);
+                npfHappened = true;
+                resultBuffer = ByteBuffer.allocate(0);
+                data = resultBuffer.array();
+              }
+            }
+
+            // report out on how things went above
+            if (npfHappened) {    // We lost at least once
+              if (recovered) {
+                LOG.log(Level.WARNING, "recovered from NPF in exportProjectFile filename = " + fd.gcsName +
+                  " count = " + count);
+              } else {
+                LOG.log(Level.WARNING, "FATAL NPF in exportProjectFile filename = " + fd.gcsName);
+                if (fatalError) {
+                  throw new IOException("FATAL Error reading file from GCS filename = " + fd.gcsName);
                 }
               }
-            } finally {
-              readChannel.close();
             }
-            data = resultBuffer.array();
           } catch (IOException e) {
             throw CrashReport.createAndLogError(LOG, null,
               collectProjectErrorInfo(userId, projectId, fileName), e);
@@ -1635,7 +1952,7 @@ public class ObjectifyStorageIo implements  StorageIo {
                         StorageUtil.ANDROID_KEYSTORE_FILENAME), e);
               }
             }
-          });
+        }, true);
       } catch (ObjectifyException e) {
         throw CrashReport.createAndLogError(LOG, null, collectUserErrorInfo(userId), e);
       }
@@ -1666,7 +1983,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             motd.t = new Motd(MOTD_ID, "Oops, no message of the day!", null);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, null, e);
     }
@@ -1719,7 +2036,7 @@ public class ObjectifyStorageIo implements  StorageIo {
               datastore.put(new_data);
           }
           }
-        });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, null, e);
     }
@@ -1753,7 +2070,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             data.projectId = projectId;
             datastore.put(data);
           }
-        });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, null, e);
     }
@@ -1775,7 +2092,7 @@ public class ObjectifyStorageIo implements  StorageIo {
             datastore.put(firstMotd);
           }
         }
-      });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, "Initing MOTD", e);
     }
@@ -1809,7 +2126,7 @@ public class ObjectifyStorageIo implements  StorageIo {
               datastore.put(new_data);
           }
           }
-        });
+      }, true);
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null, null, e);
     }
@@ -1877,22 +2194,38 @@ public class ObjectifyStorageIo implements  StorageIo {
   }
 
   /**
-   * Call job.run() in a transaction and commit the transaction if no exceptions
-   * occur. If we get a {@link java.util.ConcurrentModificationException}
+   * Call job.run() if we get a {@link java.util.ConcurrentModificationException}
    * or {@link com.google.appinventor.server.storage.ObjectifyException}
    * we will retry the job (at most {@code MAX_JOB_RETRIES times}).
    * Any other exception will cause the job to fail immediately.
+   * If useTransaction is true, create a transaction and run the job in
+   * that transaction. If the job terminates normally, commit the transaction.
+   *
+   * Note: Originally we ran all jobs in a transaction. However in
+   *       many places there is no need for a transaction because
+   *       there is nothing to rollback on failure. Using transactions
+   *       has a performance implication, it disables Objectify's
+   *       ability to use memcache.
+   *
    * @param job
+   * @param useTransaction -- Set to true to run job in a transaction
    * @throws ObjectifyException
    */
   @VisibleForTesting
-  void runJobWithRetries(JobRetryHelper job) throws ObjectifyException {
+  void runJobWithRetries(JobRetryHelper job, boolean useTransaction) throws ObjectifyException {
     int tries = 0;
     while (tries <= MAX_JOB_RETRIES) {
-      Objectify datastore = ObjectifyService.beginTransaction();
+      Objectify datastore;
+      if (useTransaction) {
+        datastore = ObjectifyService.beginTransaction();
+      } else {
+        datastore = ObjectifyService.begin();
+      }
       try {
         job.run(datastore);
-        datastore.getTxn().commit();
+        if (useTransaction) {
+          datastore.getTxn().commit();
+        }
         break;
       } catch (ConcurrentModificationException ex) {
         job.onNonFatalError();
@@ -1906,7 +2239,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         // that creates this exception (other than this method) is uploadToBlobstore
         job.onNonFatalError();
       } finally {
-        if (datastore.getTxn().isActive()) {
+        if (useTransaction && datastore.getTxn().isActive()) {
           try {
             datastore.getTxn().rollback();
           } catch (RuntimeException e) {
@@ -1953,7 +2286,12 @@ public class ObjectifyStorageIo implements  StorageIo {
   @VisibleForTesting
   boolean isBlobFile(long projectId, String fileName) {
     Objectify datastore = ObjectifyService.begin();
-    FileData fd = datastore.find(projectFileKey(projectKey(projectId), fileName));
+    Key<FileData> fileKey = projectFileKey(projectKey(projectId), fileName);
+    FileData fd;
+    fd = (FileData) memcache.get(fileKey.getString());
+    if (fd == null) {
+      fd = datastore.find(fileKey);
+    }
     if (fd != null) {
       return fd.isBlob;
     } else {
