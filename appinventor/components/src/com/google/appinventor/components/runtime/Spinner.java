@@ -1,7 +1,8 @@
 // -*- mode: java; c-basic-offset: 2; -*-
 // Copyright 2009-2011 Google, All Rights reserved
 // Copyright 2011-2014 MIT, All rights reserved
-// Released under the MIT License https://raw.github.com/mit-cml/app-inventor/master/mitlicense.txt
+// Released under the Apache License, Version 2.0
+// http://www.apache.org/licenses/LICENSE-2.0
 
 package com.google.appinventor.components.runtime;
 
@@ -40,6 +41,7 @@ public final class Spinner extends AndroidViewComponent implements OnItemSelecte
   private YailList items = new YailList();
   private String selection;
   private int selectionIndex;
+  private boolean isInitialized=false;
 
   public Spinner(ComponentContainer container) {
     super(container);
@@ -121,6 +123,10 @@ public final class Spinner extends AndroidViewComponent implements OnItemSelecte
       category = PropertyCategory.BEHAVIOR)
   public void Elements(YailList itemList){
     items = ElementsUtil.elements(itemList, "Spinner");
+
+    //avoid firing off the OnItemSelect when component is initialized or data is changed
+    isInitialized = false;
+
     setAdapterData(itemList.toStringArray());
   }
 
@@ -179,6 +185,12 @@ public final class Spinner extends AndroidViewComponent implements OnItemSelecte
   }
 
   public void onItemSelected(AdapterView<?> parent, View view, int position, long id){
+    //prevent AfterPicking triggering when component has just been instantiated.
+    if (!isInitialized) {
+      isInitialized = true;
+      return;
+    }
+
     SelectionIndex(position + 1); // AI lists are 1-based
     AfterSelecting(selection);
   }
