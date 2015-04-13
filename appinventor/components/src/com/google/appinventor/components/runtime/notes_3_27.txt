@@ -1,0 +1,37 @@
+Glaciers and Glaciation
+	Evidence - Erratics (rocks from far away)
+			   Striations (scratches)
+
+	Theory Development
+		1. Diluvial Theory - Noahs flood, evidence called diluvium
+		2. Iceberg theory - ice bergs in flood carry rocks, evidence called drift
+		3. Glacial theory - glaciers distribute erratics and cause striations
+			Jean de Charpentier came up with idea
+			Louis Aggassiz found more evidence and came up with Ice Ages
+
+	Glacier - Body of snow + ice formed by the accumulation of snow and refrozen meltwater
+			that shows evidence of of past or present movement (flows under own weight or slides if water underneath)
+
+		Requirements:
+			1. Landmass (not on ocean)
+			2. snow precipitation
+			3. Preservation - cold enough
+
+		2 Common occurences (extremes)
+			1. Polar climate - very cold with relatively light snow fall (mean ann Temp < 20 deg Celcius, < 20 cm snow)
+			2. Temperate Climate - relatively warm w/ very heavy snowfall (mean ann Temp < -5 to -10 deg Celcius, meters or 10s of meters of snow)
+
+	Glacier formation
+		1. Accumulation - snowfall, freezing rain
+		2. Transformation - 
+			snow (sediment) -> Firm -> Ice (cementation) -> Recrystallized Ice (metamorphism)
+			A. Compaction
+			B. Pressure
+			C. Super(im)posed ice growth
+			D. Solid state recrystallization @ high pressure
+		3. Ablation - melting, calving (icebergs)
+
+	Glacier Mass Balance (Budget) 
+		Total Acc = Total Ablation + Mass Balance ( - loss + gain)
+		
+	

@@ -1,0 +1,2 @@
+serviceClass: com.google.appinventor.shared.rpc.user.UserInfoService
+path: F8B6D0E53940921FA5895C8F72CA5C4E.gwt.rpc
