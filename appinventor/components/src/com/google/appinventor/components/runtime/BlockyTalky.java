@@ -115,19 +115,14 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         if(addr.equals("")){
             addr = getIPAddress(false);
         }
-        Log.d(LOG_TAG,"IP : " + addr);
-        // String broadcastAddr = formatBroadcast(addr);
         String broadcastAddr = "224.0.0.1";
-        Log.d(LOG_TAG,"BROADCAST IP : " + broadcastAddr);
 
         try {
             mContext = container.$context();
             InetAddress ip = InetAddress.getByName(addr); //Android ip
-            // InetAddress ip = InetAddress.getByName("192.168.1.100"); //Android ip
             InetAddress bip = InetAddress.getByName(broadcastAddr);
             ds = new DatagramSocket(RECEIVE_PORT,ip);
             broadcastSocket = new MulticastSocket(BROADCAST_PORT);
-            // broadcastSocket = new DatagramSocket(BROADCAST_PORT,bip);
             broadcastSocket.joinGroup(bip);
             broadcastSocket.setBroadcast(true);
             MessageListener listener = new MessageListener();
@@ -150,6 +145,28 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
             Log.d(LOG_TAG,"Exception running threads " + e);
             e.printStackTrace();
         }
+        // registerSocket();
+        try {
+                Log.d(LOG_TAG, "Making new socket.");
+                client = new EmptyClient(new URI(blockyTalkyMessageRouter), new Draft_10(), headers, 10000);
+                client.connect();
+                Log.d(LOG_TAG, "Initiated connection.");
+                int i=1;
+                while(!client.isOpen()){
+                    i *= i;
+                    i ++;
+                }
+                Log.d(LOG_TAG, "Socket Set Up");
+            } catch (Exception e) {
+                Log.d(LOG_TAG, "Exception Caught");
+                e.printStackTrace();
+            }
+            BlockyTalkyMessage registerMessage = new BlockyTalkyMessage(this.nodeName, "dax", "");
+            client.send(registerMessage.toJson());
+            Log.d(LOG_TAG, "registered with message router as " + this.nodeName);
+    }
+
+    private void registerSocket(){
         try {
                 Log.d(LOG_TAG, "Making new socket.");
                 client = new EmptyClient(new URI(blockyTalkyMessageRouter), new Draft_10(), headers, 10000);
@@ -175,6 +192,8 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         if(wifi != null){
             WifiManager.MulticastLock lock = wifi.createMulticastLock(LOG_TAG);
             lock.acquire();
+        }else{
+            Log.d(LOG_TAG, "WIFI MANAGER NULL");
         }
     }
 
@@ -206,63 +225,21 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         return "";
     }
 
-        // private InetAddress getBroadcastAddress() throws IOException {
-    //     WifiManager wifi = (WifiManager) mContext.getSystemService(Context.WIFI_SERVICE);
-    //     DhcpInfo dhcp = wifi.getDhcpInfo();
-    // // handle null somehow
-
-    //     int broadcast = (dhcp.ipAddress & dhcp.netmask) | ~dhcp.netmask;
-    //     byte[] quads = new byte[4];
-    //     for (int k = 0; k < 4; k++)
-    //       quads[k] = (byte) ((broadcast >> k * 8) & 0xFF);
-    //   return InetAddress.getByAddress(quads);
-    // } 
-
-    // private static String getBroadcast() throws SocketException {
-    //     System.setProperty("java.net.preferIPv4Stack", "true");
-    //     for (Enumeration<NetworkInterface> niEnum = NetworkInterface.getNetworkInterfaces(); niEnum.hasMoreElements();) {
-    //         NetworkInterface ni = niEnum.nextElement();
-    //         if (!ni.isLoopback()) {
-    //             for (InterfaceAddress interfaceAddress : ni.getInterfaceAddresses()) {
-    //                 return interfaceAddress.getBroadcast().toString().substring(1);
-    //             }
-    //         }
-    //     }
-    //     return null;
-    // }
-
-    // Test function
+        // Test function
     private void sendString(String message, String destination) {
         BlockyTalkyMessage btMessage = new BlockyTalkyMessage(this.nodeName, destination, message);
         Log.d(LOG_TAG,"Sending to: " + destination);
         if (localBTs.get(destination) == null) {
-            // try {
-            //     Log.d(LOG_TAG, "Making new socket.");
-
-
-            //     client = new EmptyClient(new URI(blockyTalkyMessageRouter), new Draft_10(), headers, 10000);
-            //     client.connect();
-            //     Log.d(LOG_TAG, "Initiated connection.");
-            //     int i=1;
-            //     while(!client.isOpen()){
-            //         i *= i;
-            //         i ++;
-            //     }
-            //     Log.d(LOG_TAG, "Socket Set Up");
-            // } catch (Exception e) {
-            //     Log.d(LOG_TAG, "Exception Caught");
-            //     e.printStackTrace();
-            // }
-            // BlockyTalkyMessage registerMessage = new BlockyTalkyMessage(this.nodeName, "dax", "");
-            // client.send(registerMessage.toJson());
-            // Log.d(LOG_TAG, "registered with message router as " + this.nodeName);
+            
             if (client != null && client.isOpen()) {
                 client.send(btMessage.toJson());
+            }else{
+               //reopen client 
+                registerSocket();
+                client.send(btMessage.toJson());
             }
+
         } else {
-            // client = clients.get(destination);
-            // Log.d(LOG_TAG, "client:");
-            // Log.d(LOG_TAG, client.toString());
             new SendMessageTask().execute(btMessage.toJson(), destination);
         }
     }
@@ -279,6 +256,9 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
     @SimpleProperty(description = "Name of message sender")
     public void NodeName(String name) {
         this.nodeName = name;
+        if(client == NULL || !client.isOpen()){
+            registerSocket();
+        }
     }
 
     // @SimpleProperty(description = "List of Local BlockyTalkies")
@@ -348,21 +328,16 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
             try {
                 String msg = strings[0];
                 String dest = strings[1];
-                Log.d(LOG_TAG,"IN THE SEND MESSAGE THING!!!!!!");
                 InetAddress ip = localBTs.get(dest).getIP();
                 int port = localBTs.get(dest).getPort();
-                // InetAddress ip = InetAddress.getByName("192.168.1.100"); //computer IP
-//                InetAddress ip = InetAddress.getByName("192.168.1.255"); //Broadcast IP
-//                InetAddress ip = InetAddress.getByName("130.64.221.169"); //computer IP
-                System.out.println("INETADDR : " + ip.toString());
                 byte[] data = msg.getBytes();
                 int len = data.length;
-                DatagramPacket dp = new DatagramPacket(data, len, ip, port);
+                DatagramPacket dp = new DatagramPacket(data, len, ip, 9999);
                 ds.send(dp);
             } catch (IOException e) {
                 Log.d(LOG_TAG,"Caught IO Exception: " + e.getMessage());
             }
-            return "Success?";
+            return "Success";
         }
     } 
 
@@ -370,7 +345,6 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
 
         @Override
         public void run() {
-            Log.d(LOG_TAG,"IN RECEIVE LOOP");
             byte[] data = new byte[1024];
             DatagramPacket dp = new DatagramPacket(data,1024);
             while(true){
@@ -396,7 +370,6 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
 
         @Override
         public void run() {
-            Log.d(LOG_TAG,"IN Broadcast RECEIVE LOOP");
             byte[] data = new byte[1024];
             DatagramPacket dp = new DatagramPacket(data,1024);
             while(true){
@@ -455,10 +428,6 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
             filterLocalBTs();
             //Send Announcement
             try{
-                // JSONObject announcement = new JSONObject();
-                // announcement.put("name","BlockyTalky");
-                // announcement.put("ip", ds.getInetAddress().toString());
-                // String msg = announcement.toString();
                 BlockyTalkyMessage announcement = new BlockyTalkyMessage(nodeName, "announce", "announce");
                 String msg = announcement.toJson();
                 byte[] data = msg.getBytes();
@@ -489,13 +458,11 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
 
         public BlockyTalkyMessage(String json) {
             JSONObject message;
-            Log.d(LOG_TAG, "parsing json: " + json);
             try {
                 message = new JSONObject(json);
                 this.source = message.getString("source");
                 this.destination = message.getString("destination");
                 this.content = message.getString("content");
-                Log.d(LOG_TAG, "Message content: " + this.content);
             } catch (Exception e) {
                 Log.d(LOG_TAG, "Exception while parsing json");
                 e.printStackTrace();
@@ -530,7 +497,7 @@ public class BlockyTalky extends AndroidNonvisibleComponent implements Component
         @Override
         public void onClose(int code, String reason, boolean remote) {
             Log.d(LOG_TAG, "closed with exit code " + code + " additional info: " + reason);
-            // clients.values().remove(this);
+            client = null;
         }
 
         @Override
